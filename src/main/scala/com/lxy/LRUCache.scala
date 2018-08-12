@@ -8,22 +8,24 @@ import java.util.concurrent.locks.ReentrantLock
 import scala.reflect.ClassTag
 
 class LRUCache[K, V](
-    private val concurrency: Int,
-    private val initialCapacity: Int,
-    private val maxWeight: Long,
-    private val weigher: Weigher[K, V],
-    private val defaultLoader: Loader[K, V],
-    private val removeListeners: Seq[RemoveListener[K, V]]) extends Cache[K, V]{
+    private final val concurrency: Int,
+    private final val initialCapacity: Int,
+    private final val maxWeight: Long,
+    private final val weigher: Weigher[K, V],
+    private final val defaultLoader: Loader[K, V],
+    private final val satisfy: Satisfy[K, V],
+    private final val removeListeners: Seq[RemoveListener[K, V]]) extends Cache[K, V]{
 
   private final val (segmentCount, shift, segmentInitialCapacity, weights) = init()
   private final val segments = new Array[Segment[K, V]](segmentCount)
   (0 until segments.length).foreach{ i =>
-    segments(i) = createSegment(segmentInitialCapacity, Integer.MAX_VALUE, weights(i), defaultLoader, weigher)
+    segments(i) =
+      createSegment(segmentInitialCapacity, Integer.MAX_VALUE, weights(i), defaultLoader, satisfy, weigher)
   }
   private final val segmentShift = 32 - shift
   private final val segmentMask = segmentCount - 1
 
-  private val removalQueue = new LinkedBlockingQueue[Entry[K, V]]()
+  private final val removalQueue = new LinkedBlockingQueue[Entry[K, V]]()
 
   private val removeTask = new Runnable {
     override def run(): Unit = {
@@ -36,7 +38,7 @@ class LRUCache[K, V](
     }
   }
 
-  private val removalExecutor = Executors.newScheduledThreadPool(2)
+  private final val removalExecutor = Executors.newScheduledThreadPool(2)
   removalExecutor.scheduleAtFixedRate(removeTask, 5, 1, TimeUnit.SECONDS)
 
   private def init(): (Int, Int, Int, Array[Long]) = {
@@ -78,8 +80,9 @@ class LRUCache[K, V](
       maxSize: Int,
       maxWeight: Long,
       loader: Loader[K, V],
+      satisfy: Satisfy[K, V],
       weigher: Weigher[K, V]): Segment[K, V] = {
-    new Segment[K, V](this, size, maxSize, maxWeight, loader, weigher)
+    new Segment[K, V](this, size, maxSize, maxWeight, loader, satisfy, weigher)
   }
 
   private def segmentFor(hash: Int): Segment[K, V] = {
@@ -134,256 +137,277 @@ class LRUCache[K, V](
     return h ^ (h >>> 16)
   }
 
-  override private[lxy] def enqueueNotification(entry: Entry[K, V]): Unit = {
+  override protected def enqueueNotification(entry: Entry[K, V]): Unit = {
     removalQueue.offer(entry)
+  }
+
+  override protected def triggerListenerManual(entry: Entry[K, V]): Unit = {
+    removeListeners.foreach{ listener =>
+      listener.onRemove(entry.getKey(), entry.getValue())
+    }
   }
 
   override def clear(): Unit = {
     segments.foreach(_.clear())
   }
-}
 
-private[lxy] class Segment[K, V](
-    cache: Cache[K, V],
-    size: Int,
-    maxSize: Int,
-    maxWeight: Long,
-    defaultLoader: Loader[K, V],
-    weigher: Weigher[K, V]){
-  private val lock = new ReentrantLock()
-  @volatile private var totalWeight: Long = 0L
-  @volatile private var table = new AtomicReferenceArray[Entry[K, V]](size)
-  @volatile private var count: Int = 0
-  @volatile private var threshold = size * 3 / 4
-  private val recentQueue = new ConcurrentLinkedQueue[Entry[K, V]]()
-  @volatile private var accessQueue = new AccessQueue[K, V]()
+  private class Segment[K, V](
+      private final val cache: Cache[K, V],
+      private final val size: Int,
+      private final val maxSize: Int,
+      private final val maxWeight: Long,
+      private final val defaultLoader: Loader[K, V],
+      private final val satisfy: Satisfy[K, V],
+      private final val weigher: Weigher[K, V]){
+    private val lock = new ReentrantLock()
+    @volatile private var totalWeight: Long = 0L
+    @volatile private var table = new AtomicReferenceArray[Entry[K, V]](size)
+    @volatile private var count: Int = 0
+    @volatile private var threshold = size * 3 / 4
+    private val recentQueue = new ConcurrentLinkedQueue[Entry[K, V]]()
+    @volatile private var accessQueue = new AccessQueue[K, V]()
 
-  def get(key: K, hash: Int): Option[V] = {
-    get(key, hash, defaultLoader)
-  }
+    def get(key: K, hash: Int): Option[V] = {
+      get(key, hash, defaultLoader)
+    }
 
-  def get(key: K, hash: Int, loader: Loader[K, V]): Option[V] = {
-    if (count != 0) {
-      val first = table.get((hash & (table.length() - 1)))
-      var entry: Entry[K, V] = first
-      while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
-        entry = entry.getNext()
-      }
+    def get(key: K, hash: Int, loader: Loader[K, V]): Option[V] = {
+      if (count != 0) {
+        val first = table.get((hash & (table.length() - 1)))
+        var entry: Entry[K, V] = first
+        while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
+          entry = entry.getNext()
+        }
 
-      if (entry != null) {
-        val value = entry.getValue()
-        recordRead(entry)
-        Some(value)
+        if (entry != null) {
+          val value = entry.getValue()
+          recordRead(entry)
+          Some(value)
+        } else {
+          Option(put(key, hash, first, defaultLoader))
+        }
       } else {
-        Option(put(key, hash, first, defaultLoader))
+        None
       }
-    } else {
-      None
+
     }
 
-  }
+    private def put(key: K, hash: Int, head: Entry[K, V], loader: Loader[K, V]): V = {
+      lock.lock()
+      try {
+        prepareWrite()
 
-  private def put(key: K, hash: Int, head: Entry[K, V], loader: Loader[K, V]): V = {
-    lock.lock()
-    try {
-      prepareWrite()
+        var entry: Entry[K, V] = head
+        while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
+          entry = entry.getNext()
+        }
 
-      var entry: Entry[K, V] = head
-      while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
-        entry = entry.getNext()
+        // if another thread already load it, just return it
+        if (entry != null) {
+          val value = entry.getValue()
+          recordReadWithLock(entry)
+          return value
+        }
+
+        if (count > threshold) {
+          expand()
+        }
+
+        val loadingStart = System.nanoTime()
+        val value = loader.load(key)
+        val loadingTime = System.nanoTime() - loadingStart
+        val weight = weigher.weight(key, value)
+        // First, we need to satisfy the weight condition's check
+        if (weight > (maxWeight - totalWeight)) {
+          // if there aren't enough space, evict it.
+          evict(maxWeight - weight)
+        }
+
+        // Second, we need to satisfy the `Satisfy`'s check
+        while (!satisfy.check(key, value, weight)) {
+          val evicted = evict()
+          cache.triggerListenerManual(evicted)
+        }
+
+        totalWeight += weight
+        count += 1
+        val newEntry = Entry(key, hash, value, weight, head)
+        table.set((hash & (table.length() - 1)), newEntry)
+        recordReadWithLock(newEntry)
+        value
+      } finally {
+        lock.unlock()
       }
-
-      // if another thread already load it, just return it
-      if (entry != null) {
-        val value = entry.getValue()
-        recordReadWithLock(entry)
-        return value
-      }
-
-      if (count > threshold) {
-        expand()
-      }
-
-      val loadingStart = System.nanoTime()
-      val value = loader.load(key)
-      val loadingTime = System.nanoTime() - loadingStart
-      val weight = weigher.weight(key, value)
-      if (weight > (maxWeight - totalWeight)) {
-        // if there aren't enough space, evict it.
-        evict(maxWeight - weight)
-      }
-      totalWeight += weight
-      count += 1
-      val newEntry = Entry(key, hash, value, weight, head)
-      table.set((hash & (table.length() - 1)), newEntry)
-      recordReadWithLock(newEntry)
-      value
-    } finally {
-      lock.unlock()
     }
-  }
 
-  private def prepareWrite(): Unit = {
-    while (!recentQueue.isEmpty) {
-      accessQueue.add(recentQueue.poll())
+    private def prepareWrite(): Unit = {
+      while (!recentQueue.isEmpty) {
+        accessQueue.add(recentQueue.poll())
+      }
     }
-  }
 
-  private def evict(max: Long): Unit = {
-    while (totalWeight > max) {
+    private def evict(): Entry[K, V] = {
       val evictedEntry = accessQueue.peek()
       removeEntryFromChain(evictedEntry)
-
+      evictedEntry
     }
-  }
 
-  private def enqueueNotification(entry: Entry[K, V]): Unit = {
-    totalWeight -= entry.getWeight
-    count -= 1
-    cache.enqueueNotification(entry)
-  }
-
-  /**
-    * Remove a entry from the entry chain. we need guarantee that it doesn't impact the read when
-    * removing the entry, so we need copy those entry which from head to target.
-    * @param entry The entry need to be removed
-    */
-  private def removeEntryFromChain(entry: Entry[K, V]): Unit = {
-    lock.lock()
-    try {
-      enqueueNotification(entry)
-      // Modify accessQueue need be guard by lock, so we should remove the entry in accessQueue at here
-      accessQueue.remove(entry)
-      val index = entry.getHash() & (table.length() - 1)
-      val head = table.get(index)
-      var e = head
-      var newHead = entry.getNext()
-      while (e != entry) {
-        newHead = Entry.copy(e, newHead)
-        e = e.getNext()
+    private def evict(max: Long): Unit = {
+      while (totalWeight > max) {
+        evict()
       }
-      table.set(index, newHead)
-    } finally {
-      lock.unlock()
     }
-  }
 
-  @inline private def recordRead(entry: Entry[K, V]): Unit = {
-    recentQueue.add(entry)
-  }
+    private def enqueueNotification(entry: Entry[K, V]): Unit = {
+      totalWeight -= entry.getWeight
+      count -= 1
+      cache.enqueueNotification(entry)
+    }
 
-  @inline private def recordReadWithLock(entry: Entry[K, V]): Unit = {
-    accessQueue.add(entry)
-  }
-
-  private def expand(): Unit = {
-    lock.lock()
-    try {
-      val oldSize = table.length()
-      if (oldSize >= maxSize) {
-        return
+    /**
+      * Remove a entry from the entry chain. we need guarantee that it doesn't impact the read when
+      * removing the entry, so we need copy those entry which from head to target.
+      * @param entry The entry need to be removed
+      */
+    private def removeEntryFromChain(entry: Entry[K, V]): Unit = {
+      lock.lock()
+      try {
+        enqueueNotification(entry)
+        // Modify accessQueue need be guard by lock, so we should remove the entry in accessQueue at here
+        accessQueue.remove(entry)
+        val index = entry.getHash() & (table.length() - 1)
+        val head = table.get(index)
+        var e = head
+        var newHead = entry.getNext()
+        while (e != entry) {
+          newHead = Entry.copy(e, newHead)
+          e = e.getNext()
+        }
+        table.set(index, newHead)
+      } finally {
+        lock.unlock()
       }
+    }
 
-      val newSize = oldSize << 1
-      val newTable = new AtomicReferenceArray[Entry[K, V]](newSize)
-      threshold = newSize * 3 / 4
-      val newMask = newSize -1
-      (0 until newSize).foreach { i =>
-        val head = table.get(i)
-        val newHeadIndex = head.getHash() & newMask
-        if (head != null) {
-          if (head.getNext() == null) {
-            newTable.set(newHeadIndex, head)
-          } else {
-            var tailNewIndex = newHeadIndex
-            var tailEntry = head
-            var e = head
-            while (e != null) {
-              val newIndex = e.getHash() & newMask
-              if (newIndex != tailNewIndex) {
-                tailNewIndex = newIndex
-                tailEntry = e
+    @inline private def recordRead(entry: Entry[K, V]): Unit = {
+      recentQueue.add(entry)
+    }
+
+    @inline private def recordReadWithLock(entry: Entry[K, V]): Unit = {
+      accessQueue.add(entry)
+    }
+
+    private def expand(): Unit = {
+      lock.lock()
+      try {
+        val oldSize = table.length()
+        if (oldSize >= maxSize) {
+          return
+        }
+
+        val newSize = oldSize << 1
+        val newTable = new AtomicReferenceArray[Entry[K, V]](newSize)
+        threshold = newSize * 3 / 4
+        val newMask = newSize -1
+        (0 until newSize).foreach { i =>
+          val head = table.get(i)
+          val newHeadIndex = head.getHash() & newMask
+          if (head != null) {
+            if (head.getNext() == null) {
+              newTable.set(newHeadIndex, head)
+            } else {
+              var tailNewIndex = newHeadIndex
+              var tailEntry = head
+              var e = head
+              while (e != null) {
+                val newIndex = e.getHash() & newMask
+                if (newIndex != tailNewIndex) {
+                  tailNewIndex = newIndex
+                  tailEntry = e
+                }
+
+                e = e.getNext()
               }
 
-              e = e.getNext()
-            }
-
-            newTable.set(tailNewIndex, tailEntry)
-            e = head
-            while (e != tailEntry) {
-              val newIndex = e.getHash() & newMask
-              val newNext = newTable.get(newIndex)
-              val newHead = Entry.copy(e, newNext)
-              newTable.set(newIndex, newHead)
+              newTable.set(tailNewIndex, tailEntry)
+              e = head
+              while (e != tailEntry) {
+                val newIndex = e.getHash() & newMask
+                val newNext = newTable.get(newIndex)
+                val newHead = Entry.copy(e, newNext)
+                newTable.set(newIndex, newHead)
+              }
             }
           }
         }
-      }
 
-      table = newTable
-
-    } finally {
-      lock.unlock()
-    }
-  }
-
-
-  def contains(key: K, hash: Int): Boolean = {
-    var entry = table.get((hash & (table.length() - 1)))
-    while (entry != null) {
-      if (entry.getHash() == hash && entry.getKey() == key) {
-        return true
-      }
-
-      entry = entry.getNext()
-    }
-
-    false
-  }
-
-  def remove(key: K, hash: Int): Option[V] = {
-    var head = table.get(hash & (table.length() - 1))
-    while (head != null) {
-      if (head.getHash() == hash && head.getKey() == key) {
-        removeEntryFromChain(head)
-        return Option(head.getValue())
-      }
-
-      head = head.getNext()
-    }
-
-    None
-  }
-
-  def clear(): Unit = {
-    if (count != 0) {
-      lock.lock()
-      prepareWrite()
-      try {
-        (0 until table.length()).foreach { i =>
-          var head = table.get(i)
-          while (head != null) {
-            enqueueNotification(head)
-            head = head.getNext()
-          }
-        }
-
-        (0 until table.length()).foreach { i =>
-          table.set(i, null)
-        }
-
-        accessQueue.clear()
-        recentQueue.clear()
-        count = 0
+        table = newTable
 
       } finally {
         lock.unlock()
       }
     }
+
+
+    def contains(key: K, hash: Int): Boolean = {
+      var entry = table.get((hash & (table.length() - 1)))
+      while (entry != null) {
+        if (entry.getHash() == hash && entry.getKey() == key) {
+          return true
+        }
+
+        entry = entry.getNext()
+      }
+
+      false
+    }
+
+    def remove(key: K, hash: Int): Option[V] = {
+      var head = table.get(hash & (table.length() - 1))
+      while (head != null) {
+        if (head.getHash() == hash && head.getKey() == key) {
+          removeEntryFromChain(head)
+          return Option(head.getValue())
+        }
+
+        head = head.getNext()
+      }
+
+      None
+    }
+
+    def clear(): Unit = {
+      if (count != 0) {
+        lock.lock()
+        prepareWrite()
+        try {
+          (0 until table.length()).foreach { i =>
+            var head = table.get(i)
+            while (head != null) {
+              enqueueNotification(head)
+              head = head.getNext()
+            }
+          }
+
+          (0 until table.length()).foreach { i =>
+            table.set(i, null)
+          }
+
+          accessQueue.clear()
+          recentQueue.clear()
+          count = 0
+
+        } finally {
+          lock.unlock()
+        }
+      }
+    }
   }
 }
 
-private[lxy] object Segment {
+
+
+private[lxy] object LRUCache {
   @inline def connectAccessOrder[K, V](previous: Entry[K, V], next: Entry[K, V]): Unit = {
     previous.setNextInAccessQueue(next)
     next.setPreviousInAccessQueue(previous)
@@ -418,12 +442,12 @@ private[lxy] class AccessQueue[K: ClassTag, V: ClassTag] extends util.AbstractQu
   }
 
   override def offer(e: Entry[K, V]): Boolean = {
-    Segment.connectAccessOrder[K, V](e.getPreviousInAccessQueue(), e.getNextInAccessQueue())
+    LRUCache.connectAccessOrder[K, V](e.getPreviousInAccessQueue(), e.getNextInAccessQueue())
     // put the entry in the tail
     // header.previous <-> header
     // header.previous <-> entry <-> header
-    Segment.connectAccessOrder[K, V](header.getPreviousInAccessQueue(), e)
-    Segment.connectAccessOrder[K, V](e, header)
+    LRUCache.connectAccessOrder[K, V](header.getPreviousInAccessQueue(), e)
+    LRUCache.connectAccessOrder[K, V](e, header)
     _size += 1
     true
   }
@@ -449,8 +473,8 @@ private[lxy] class AccessQueue[K: ClassTag, V: ClassTag] extends util.AbstractQu
   override def remove(o: scala.Any): Boolean = {
     if (contains(o)) {
       val entry = o.asInstanceOf[Entry[K, V]]
-      Segment.connectAccessOrder[K, V](entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
-      Segment.nullifyAccessOrder[K, V](entry)
+      LRUCache.connectAccessOrder[K, V](entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
+      LRUCache.nullifyAccessOrder[K, V](entry)
       _size -= 1
       true
     } else {
@@ -488,7 +512,7 @@ private[lxy] class AccessQueue[K: ClassTag, V: ClassTag] extends util.AbstractQu
     var entry = header.getNextInAccessQueue()
     while (entry != header) {
       val next = entry.getNextInAccessQueue()
-      Segment.nullifyAccessOrder(entry)
+      LRUCache.nullifyAccessOrder(entry)
       entry = next
     }
 

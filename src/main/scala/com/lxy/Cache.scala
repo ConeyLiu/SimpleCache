@@ -8,7 +8,8 @@ abstract class Cache[K: ClassTag, V: ClassTag] {
   def contains(key: K): Boolean
   def remove(key: K): Option[V]
   protected def reHash(key: K): Int
-  private[lxy] def enqueueNotification(entry: Entry[K, V]): Unit
+  protected def enqueueNotification(entry: Entry[K, V]): Unit
+  protected def triggerListenerManual(entry: Entry[K, V]): Unit
   def clear(): Unit
 }
 
@@ -19,7 +20,8 @@ object Cache {
       maxWeight: Long,
       weigher: Weigher[K, V],
       defaultLoader: Loader[K, V],
+      satisfy: Satisfy[K, V],
       removeListeners: Seq[RemoveListener[K, V]]): Cache[K, V] = {
-    new LRUCache(concurrency, initialCapacity, maxWeight, weigher, defaultLoader, removeListeners)
+    new LRUCache(concurrency, initialCapacity, maxWeight, weigher, defaultLoader, satisfy, removeListeners)
   }
 }
