@@ -3,14 +3,11 @@ package com.lxy
 import scala.reflect.ClassTag
 
 trait Entry[K, V] {
-  def keyClassTag: ClassTag[K]
-  def valueClassTag: ClassTag[V]
-  def setValueReference(reference: ValueReference[K, V]): Unit
-  def getValueReference(): ValueReference[K, V]
   def getKey(): K
   def getHash(): Int
+  def getValue(): V
+  def getWeight: Int
   def getNext(): Entry[K, V]
-  def setNext(entry: Entry[K, V]): Unit
   def setNextInAccessQueue(next: Entry[K, V]): Unit
   def getNextInAccessQueue(): Entry[K, V]
   def setPreviousInAccessQueue(previous: Entry[K, V]): Unit
@@ -18,21 +15,16 @@ trait Entry[K, V] {
 }
 
 abstract class AbstractEntry[K, V] extends Entry[K, V] {
-  override def keyClassTag: ClassTag[K] = throw new UnsupportedOperationException
-
-  override def valueClassTag: ClassTag[V] = throw new UnsupportedOperationException
-
-  override def setValueReference(reference: ValueReference[K, V]): Unit = throw new UnsupportedOperationException
-
-  override def getValueReference(): ValueReference[K, V] = throw new UnsupportedOperationException
 
   override def getKey(): K = throw new UnsupportedOperationException
 
   override def getHash(): Int = throw new UnsupportedOperationException
 
-  override def getNext(): Entry[K, V] = throw new UnsupportedOperationException
+  override def getValue(): V = throw new UnsupportedOperationException
 
-  override def setNext(entry: Entry[K, V]): Unit = throw new UnsupportedOperationException
+  override def getWeight: Int = throw new UnsupportedOperationException
+
+  override def getNext(): Entry[K, V] = throw new UnsupportedOperationException
 
   override def setNextInAccessQueue(next: Entry[K, V]): Unit = throw new UnsupportedOperationException
 
@@ -43,32 +35,25 @@ abstract class AbstractEntry[K, V] extends Entry[K, V] {
   override def getPreviousInAccessQueue(): Entry[K, V] = throw new UnsupportedOperationException
 }
 
-class ValueReferenceEntry[K, V](
-    key: K,
-    hash: Int,
-    private var next: Entry[K ,V],
-    override val keyClassTag: ClassTag[K],
-    override val valueClassTag: ClassTag[V]) extends AbstractEntry[K, V] {
+class ConcreteEntry[K, V](
+    private final val key: K,
+    private final val hash: Int,
+    private final val value: V,
+    private final val weight: Int,
+    private final val next: Entry[K ,V]) extends AbstractEntry[K, V] {
 
-  private var reference: ValueReference[K, V] = null
-  private var nextAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
-  private var previousAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
-
-  override def setValueReference(reference: ValueReference[K, V]): Unit = {
-    this.reference = reference
-  }
-
-  override def getValueReference(): ValueReference[K, V] = reference
+  @volatile private var nextAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
+  @volatile private var previousAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
 
   override def getKey(): K = key
 
   override def getHash(): Int = hash
 
-  override def getNext(): Entry[K, V] = next
+  override def getValue(): V = value
 
-  override def setNext(entry: Entry[K, V]): Unit = {
-    next = entry
-  }
+  override def getWeight: Int = weight
+
+  override def getNext(): Entry[K, V] = next
 
   override def setNextInAccessQueue(next: Entry[K, V]): Unit = {
     this.nextAccess = next
@@ -85,7 +70,7 @@ class ValueReferenceEntry[K, V](
 
 object Entry {
 
-  private val NULL = new ValueReferenceEntry[Any, Any](0, 0, null, null, null)
+  private val NULL = new ConcreteEntry[Any, Any](0, 0, null, 0, null)
 
   def getNullEntry[K, V](): Entry[K, V] = {
     NULL.asInstanceOf[Entry[K, V]]
@@ -94,6 +79,20 @@ object Entry {
   def apply[K: ClassTag, V: ClassTag](
       key: K,
       hash: Int,
+      value: V,
+      weight: Int,
       next: Entry[K, V]): Entry[K, V] =
-    new ValueReferenceEntry(key, hash, next, implicitly[ClassTag[K]], implicitly[ClassTag[V]])
+    new ConcreteEntry(key, hash, value, weight, next)
+
+  def copy[K: ClassTag, V: ClassTag](
+      original: Entry[K, V],
+      newNext: Entry[K, V]): Entry[K, V] = {
+    // here, we can't null the access entry in original access queue, because we need guarantee that
+    // the read of old table can proceed
+    val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),
+      original.getValue(), original.getWeight, newNext)
+    entry.setPreviousInAccessQueue(original.getPreviousInAccessQueue())
+    entry.setNextInAccessQueue(entry.getNextInAccessQueue())
+    entry
+  }
 }

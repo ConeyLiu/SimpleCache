@@ -1,7 +1,5 @@
 package com.lxy
 
-import scala.reflect.ClassTag
-
-abstract class Loader[K: ClassTag, V: ClassTag] {
+abstract class Loader[K, V] {
   def load(key: K): V
 }
