@@ -44,6 +44,15 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/org.scalacheck/scalacheck -->
+    <dependency>
+      <groupId>org.scalacheck</groupId>
+      <artifactId>scalacheck_2.11</artifactId>
+      <version>1.14.0</version>
+      <scope>test</scope>
+    </dependency>
+
+
 
     <!-- logging -->
     <dependency>

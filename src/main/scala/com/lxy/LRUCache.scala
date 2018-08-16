@@ -7,6 +7,7 @@ import java.util.concurrent.locks.ReentrantLock
 
 import scala.reflect.ClassTag
 
+//TODO: extend from AbstractMap?
 class LRUCache[K, V](
     private final val concurrency: Int,
     private final val initialCapacity: Int,
@@ -17,7 +18,7 @@ class LRUCache[K, V](
     private final val removeListeners: Seq[RemoveListener[K, V]]) extends Cache[K, V]{
 
   private final val (segmentCount, shift, segmentInitialCapacity, weights) = init()
-  private final val segments = new Array[Segment[K, V]](segmentCount)
+  private final val segments = new Array[Segment](segmentCount)
   (0 until segments.length).foreach{ i =>
     segments(i) =
       createSegment(segmentInitialCapacity, Integer.MAX_VALUE, weights(i), defaultLoader, satisfy, weigher)
@@ -38,11 +39,14 @@ class LRUCache[K, V](
     }
   }
 
+  // We used 2 thread to trigger the removeListeners, this may make the order of really removed is
+  // different from the record order which in removalQueue.
+  // TODO: make the size of the threadpool and remove order configurable.
   private final val removalExecutor = Executors.newScheduledThreadPool(2)
-  removalExecutor.scheduleAtFixedRate(removeTask, 5, 1, TimeUnit.SECONDS)
+  removalExecutor.scheduleAtFixedRate(removeTask, 1, 1, TimeUnit.SECONDS)
 
   private def init(): (Int, Int, Int, Array[Long]) = {
-    var segmentCount = 1
+    var segmentCount: Int = 1
     var segmentShift = 0
     while (segmentCount < concurrency) {
       segmentShift += 1
@@ -62,14 +66,14 @@ class LRUCache[K, V](
 
     require(maxWeight > segmentCount, "Maximum weight is too small, please set more larger")
     val weightPerSegment = maxWeight / segmentCount
-    val remainder = maxWeight % segmentCount
+    val remainder = (maxWeight % segmentCount).toInt
     val weights = new Array[Long](segmentCount)
-    (0 until remainder).foreach{ i =>
-      weights(i) = weightPerSegment + 1
+    (0 until segmentCount).foreach{ i =>
+      weights(i) = weightPerSegment
     }
 
-    (remainder until segmentCount).foreach{ i =>
-      weights(i) = weightPerSegment
+    (0 until remainder).foreach{ i =>
+      weights(i) = weights(i) + 1
     }
 
     (segmentCount, segmentShift, segmentCapacity, weights)
@@ -81,11 +85,11 @@ class LRUCache[K, V](
       maxWeight: Long,
       loader: Loader[K, V],
       satisfy: Satisfy[K, V],
-      weigher: Weigher[K, V]): Segment[K, V] = {
-    new Segment[K, V](this, size, maxSize, maxWeight, loader, satisfy, weigher)
+      weigher: Weigher[K, V]): Segment = {
+    new Segment(size, maxSize, maxWeight, loader, satisfy, weigher)
   }
 
-  private def segmentFor(hash: Int): Segment[K, V] = {
+  private def segmentFor(hash: Int): Segment = {
     segments((hash >>> segmentShift) & segmentMask)
   }
 
@@ -151,8 +155,7 @@ class LRUCache[K, V](
     segments.foreach(_.clear())
   }
 
-  private class Segment[K, V](
-      private final val cache: Cache[K, V],
+  private class Segment(
       private final val size: Int,
       private final val maxSize: Int,
       private final val maxWeight: Long,
@@ -187,7 +190,7 @@ class LRUCache[K, V](
           Option(put(key, hash, first, defaultLoader))
         }
       } else {
-        None
+        Option(put(key, hash, null, defaultLoader))
       }
 
     }
@@ -226,7 +229,7 @@ class LRUCache[K, V](
         // Second, we need to satisfy the `Satisfy`'s check
         while (!satisfy.check(key, value, weight)) {
           val evicted = evict()
-          cache.triggerListenerManual(evicted)
+          triggerListenerManual(evicted)
         }
 
         totalWeight += weight
@@ -261,7 +264,7 @@ class LRUCache[K, V](
     private def enqueueNotification(entry: Entry[K, V]): Unit = {
       totalWeight -= entry.getWeight
       count -= 1
-      cache.enqueueNotification(entry)
+      LRUCache.this.enqueueNotification(entry)
     }
 
     /**
@@ -350,16 +353,20 @@ class LRUCache[K, V](
 
 
     def contains(key: K, hash: Int): Boolean = {
-      var entry = table.get((hash & (table.length() - 1)))
-      while (entry != null) {
-        if (entry.getHash() == hash && entry.getKey() == key) {
-          return true
+      if (count != 0) {
+        var entry = table.get((hash & (table.length() - 1)))
+        while (entry != null) {
+          if (entry.getHash() == hash && entry.getKey() == key) {
+            return true
+          }
+
+          entry = entry.getNext()
         }
 
-        entry = entry.getNext()
+        false
+      } else {
+        false
       }
-
-      false
     }
 
     def remove(key: K, hash: Int): Option[V] = {
@@ -405,8 +412,6 @@ class LRUCache[K, V](
   }
 }
 
-
-
 private[lxy] object LRUCache {
   @inline def connectAccessOrder[K, V](previous: Entry[K, V], next: Entry[K, V]): Unit = {
     previous.setNextInAccessQueue(next)
@@ -420,7 +425,10 @@ private[lxy] object LRUCache {
   }
 }
 
-private[lxy] class AccessQueue[K: ClassTag, V: ClassTag] extends util.AbstractQueue[Entry[K, V]] {
+/**
+  * A dequeue used to record the access order of key. This is not threadsafe, modify should be under lock.
+  */
+private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
   private var _size: Int = 0
   private val header = new AbstractEntry[K, V] {
     private var nextAccess: Entry[K, V] = this
@@ -487,7 +495,7 @@ private[lxy] class AccessQueue[K: ClassTag, V: ClassTag] extends util.AbstractQu
     entry.getNextInAccessQueue() != Entry.getNullEntry[K, V]()
   }
 
-  override def isEmpty: Boolean = header != header.getNextInAccessQueue()
+  override def isEmpty: Boolean = header == header.getNextInAccessQueue()
 
   override def iterator(): util.Iterator[Entry[K, V]] = {
     new util.Iterator[Entry[K, V]] {

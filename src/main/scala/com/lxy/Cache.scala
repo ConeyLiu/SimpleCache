@@ -1,8 +1,6 @@
 package com.lxy
 
-import scala.reflect.ClassTag
-
-abstract class Cache[K: ClassTag, V: ClassTag] {
+abstract class Cache[K, V] {
   def get(key: K): Option[V]
   def get(key: K, loader: Loader[K, V]): Option[V]
   def contains(key: K): Boolean
@@ -24,4 +22,6 @@ object Cache {
       removeListeners: Seq[RemoveListener[K, V]]): Cache[K, V] = {
     new LRUCache(concurrency, initialCapacity, maxWeight, weigher, defaultLoader, satisfy, removeListeners)
   }
+
+  // TODO: more cache algorithms support
 }

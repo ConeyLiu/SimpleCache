@@ -1,7 +1,5 @@
 package com.lxy
 
-import scala.reflect.ClassTag
-
 trait Entry[K, V] {
   def getKey(): K
   def getHash(): Int
@@ -76,7 +74,7 @@ object Entry {
     NULL.asInstanceOf[Entry[K, V]]
   }
 
-  def apply[K: ClassTag, V: ClassTag](
+  def apply[K, V](
       key: K,
       hash: Int,
       value: V,
@@ -84,7 +82,7 @@ object Entry {
       next: Entry[K, V]): Entry[K, V] =
     new ConcreteEntry(key, hash, value, weight, next)
 
-  def copy[K: ClassTag, V: ClassTag](
+  def copy[K, V](
       original: Entry[K, V],
       newNext: Entry[K, V]): Entry[K, V] = {
     // here, we can't null the access entry in original access queue, because we need guarantee that
