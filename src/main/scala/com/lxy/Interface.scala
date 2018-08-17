@@ -47,3 +47,7 @@ trait Loader[K, V] {
     */
   def load(key: K): V
 }
+
+trait SafeLoader[K, V] {
+
+}

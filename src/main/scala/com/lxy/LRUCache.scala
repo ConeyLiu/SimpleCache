@@ -5,8 +5,6 @@ import java.util.concurrent.{ConcurrentLinkedQueue, Executors, LinkedBlockingQue
 import java.util.concurrent.atomic.AtomicReferenceArray
 import java.util.concurrent.locks.ReentrantLock
 
-import scala.reflect.ClassTag
-
 //TODO: extend from AbstractMap?
 class LRUCache[K, V](
     private final val concurrency: Int,
@@ -21,7 +19,7 @@ class LRUCache[K, V](
   private final val segments = new Array[Segment](segmentCount)
   (0 until segments.length).foreach{ i =>
     segments(i) =
-      createSegment(segmentInitialCapacity, Integer.MAX_VALUE, weights(i), defaultLoader, satisfy, weigher)
+      createSegment(segmentInitialCapacity, Integer.MAX_VALUE, weights(i), defaultLoader, weigher)
   }
   private final val segmentShift = 32 - shift
   private final val segmentMask = segmentCount - 1
@@ -84,9 +82,8 @@ class LRUCache[K, V](
       maxSize: Int,
       maxWeight: Long,
       loader: Loader[K, V],
-      satisfy: Satisfy[K, V],
       weigher: Weigher[K, V]): Segment = {
-    new Segment(size, maxSize, maxWeight, loader, satisfy, weigher)
+    new Segment(size, maxSize, maxWeight, loader, weigher)
   }
 
   private def segmentFor(hash: Int): Segment = {
@@ -94,11 +91,7 @@ class LRUCache[K, V](
   }
 
   override def get(key: K): Option[V] = {
-    if (key == null) {
-      return None
-    }
-    val hash = reHash(key)
-    segmentFor(hash).get(key, hash)
+    get(key, null)
   }
 
   override def get(key: K, loader: Loader[K, V]): Option[V] = {
@@ -106,9 +99,12 @@ class LRUCache[K, V](
       return None
     }
 
-    require(loader != null)
     val hash = reHash(key)
-    segmentFor(hash).get(key, hash, loader)
+    if (null == loader) {
+      segmentFor(hash).get(key, hash)
+    } else {
+      segmentFor(hash).get(key, hash, loader)
+    }
   }
 
   override def contains(key: K): Boolean = {
@@ -129,7 +125,7 @@ class LRUCache[K, V](
     segmentFor(hash).remove(key, hash)
   }
 
-  override protected def reHash(key: K): Int = {
+  private [LRUCache] def reHash(key: K): Int = {
     var h = key.hashCode()
     // Spread bits to regularize both segment and index locations,
     // using variant of single-word Wang/Jenkins hash.
@@ -141,11 +137,11 @@ class LRUCache[K, V](
     return h ^ (h >>> 16)
   }
 
-  override protected def enqueueNotification(entry: Entry[K, V]): Unit = {
+  private [LRUCache] def enqueueNotification(entry: Entry[K, V]): Unit = {
     removalQueue.offer(entry)
   }
 
-  override protected def triggerListenerManual(entry: Entry[K, V]): Unit = {
+  private [LRUCache] def forceEviction(entry: Entry[K, V]): Unit = {
     removeListeners.foreach{ listener =>
       listener.onRemove(entry.getKey(), entry.getValue())
     }
@@ -159,19 +155,19 @@ class LRUCache[K, V](
       private final val size: Int,
       private final val maxSize: Int,
       private final val maxWeight: Long,
-      private final val defaultLoader: Loader[K, V],
-      private final val satisfy: Satisfy[K, V],
+      private final val loader: Loader[K, V],
       private final val weigher: Weigher[K, V]){
-    private val lock = new ReentrantLock()
     @volatile private var totalWeight: Long = 0L
     @volatile private var table = new AtomicReferenceArray[Entry[K, V]](size)
     @volatile private var count: Int = 0
     @volatile private var threshold = size * 3 / 4
-    private val recentQueue = new ConcurrentLinkedQueue[Entry[K, V]]()
     @volatile private var accessQueue = new AccessQueue[K, V]()
 
+    private val lock = new ReentrantLock()
+    private val recentQueue = new ConcurrentLinkedQueue[Entry[K, V]]()
+
     def get(key: K, hash: Int): Option[V] = {
-      get(key, hash, defaultLoader)
+      get(key, hash, loader)
     }
 
     def get(key: K, hash: Int, loader: Loader[K, V]): Option[V] = {
@@ -187,10 +183,10 @@ class LRUCache[K, V](
           recordRead(entry)
           Some(value)
         } else {
-          Option(put(key, hash, first, defaultLoader))
+          Option(put(key, hash, first, loader))
         }
       } else {
-        Option(put(key, hash, null, defaultLoader))
+        Option(put(key, hash, null, loader))
       }
 
     }
@@ -229,7 +225,7 @@ class LRUCache[K, V](
         // Second, we need to satisfy the `Satisfy`'s check
         while (!satisfy.check(key, value, weight)) {
           val evicted = evict()
-          triggerListenerManual(evicted)
+          forceEviction(evicted)
         }
 
         totalWeight += weight
@@ -268,7 +264,7 @@ class LRUCache[K, V](
     }
 
     /**
-      * Remove a entry from the entry chain. we need guarantee that it doesn't impact the read when
+      * Remove an entry from the entry chain. we need guarantee that it doesn't impact the read when
       * removing the entry, so we need copy those entry which from head to target.
       * @param entry The entry need to be removed
       */
