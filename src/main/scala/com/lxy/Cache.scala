@@ -15,9 +15,17 @@ object Cache {
       maxWeight: Long,
       weigher: Weigher[K, V],
       defaultLoader: Loader[K, V],
-      satisfy: Satisfy[K, V],
-      removeListeners: Seq[RemoveListener[K, V]]): Cache[K, V] = {
-    new LRUCache(concurrency, initialCapacity, maxWeight, weigher, defaultLoader, satisfy, removeListeners)
+      cacheHandler: CacheHandler[K, V],
+      removeListeners: Seq[RemoveListener[K, V]],
+      lockManagement: LockManagement[K]): Cache[K, V] = {
+    new LRUCache(concurrency,
+        initialCapacity,
+        maxWeight,
+        weigher,
+        defaultLoader,
+        cacheHandler,
+        removeListeners,
+        lockManagement)
   }
   // TODO: more cache algorithms support
 }
