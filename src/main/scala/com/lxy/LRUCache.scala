@@ -5,7 +5,10 @@ import java.util.concurrent.{ConcurrentLinkedQueue, Executors, LinkedBlockingQue
 import java.util.concurrent.atomic.AtomicReferenceArray
 import java.util.concurrent.locks.{ReadWriteLock, ReentrantLock}
 
+import net.jcip.annotations.{GuardedBy, NotThreadSafe, ThreadSafe}
+
 //TODO: extend from AbstractMap?
+@ThreadSafe
 class LRUCache[K, V](
     private final val concurrency: Int,
     private final val initialCapacity: Int,
@@ -124,6 +127,10 @@ class LRUCache[K, V](
     segmentFor(hash).remove(key, hash)
   }
 
+  override def size(): Long = {
+    segments.foldLeft(0L)((pre, cur) => pre + cur.size)
+  }
+
   private def reHash(key: K): Int = {
     var h = key.hashCode()
     // Spread bits to regularize both segment and index locations,
@@ -156,13 +163,13 @@ class LRUCache[K, V](
   }
 
   private class Segment(
-      private final val size: Int,
+      private final val initialSize: Int,
       private final val maxSize: Int,
       private final val maxWeight: Long){
     @volatile private var totalWeight: Long = 0L
-    @volatile private var table = new AtomicReferenceArray[Entry[K, V]](size)
-    @volatile private var count: Int = 0
-    @volatile private var threshold = size * 3 / 4
+    @volatile private var table = new AtomicReferenceArray[Entry[K, V]](initialSize)
+    @GuardedBy("lock") @volatile private var count: Int = 0
+    @volatile private var threshold = initialSize * 3 / 4
     @volatile private var accessQueue = new AccessQueue[K, V]()
 
     private val lock = new ReentrantLock()
@@ -190,9 +197,9 @@ class LRUCache[K, V](
       } else {
         Option(put(key, hash, null, loader))
       }
-
     }
 
+    @GuardedBy("lock")
     private def put(key: K, hash: Int, head: Entry[K, V], loader: Loader[K, V]): V = {
       lock.lock()
       try {
@@ -214,32 +221,38 @@ class LRUCache[K, V](
           expand()
         }
 
+        //TODO: record the loading time
         val loadingStart = System.nanoTime()
         val value = loader.load(key)
         val loadingTime = System.nanoTime() - loadingStart
         val weight = weigher.weight(key, value)
+
+        require(weight < maxWeight, s"The weight: ${weight} of entry(key: ${key}, value: ${value}) " +
+          s"should be smaller than maxWeight: ${maxWeight}")
+
         // First, we need to satisfy the weight condition's check
-        if (weight > (maxWeight - totalWeight)) {
+        if (weight >= (maxWeight - totalWeight)) {
           // if there aren't enough space, evict it.
           evict(maxWeight - weight)
         }
 
-        var address = cacheHandler.allocate(key, value, weight)
+        var address = cacheHandler.allocate(key, value)
         if (address == 0) {
           // there maybe memory fragmentation
 
           // if the removal queue is not empty, we need wait it do some post process for 500 ms.
           // TODO: make the wait time configurable
           if (!LRUCache.this.removalQueueIsEmpty()) {
-            val current = System.currentTimeMillis()
-            while (address == 0 && (System.currentTimeMillis() - current) < 500) {
-              val sleepTime = 500 - (System.currentTimeMillis() - current)
+            val start = System.currentTimeMillis()
+            while (address == 0 && (System.currentTimeMillis() - start) < 200) {
+              val sleepTime = 200 - (System.currentTimeMillis() - start)
               if (sleepTime > 0) {
                 try {
                   Thread.sleep(sleepTime)
+                  address = cacheHandler.allocate(key, value)
                 } catch {
                   case _: InterruptedException =>
-                    address = cacheHandler.allocate(key, value, weight)
+                    address = cacheHandler.allocate(key, value)
                     Thread.interrupted()
                 }
               }
@@ -250,7 +263,7 @@ class LRUCache[K, V](
           if (address == 0) {
             // here, we can't call evict method directly, because the evicted entry maybe used by some task.
             // So, we need hold the exclusive lock for the given entry.
-            val iterator = accessQueue.reverseIterator()
+            val iterator = accessQueue.iterator()
             var entry: Entry[K, V] = null
             var lock: ReadWriteLock = null
             while (address == 0 && iterator.hasNext) {
@@ -260,7 +273,7 @@ class LRUCache[K, V](
                 try {
                   removeEntryFromChain(entry)
                   LRUCache.this.forceEviction(entry)
-                  address = cacheHandler.allocate(key, value, weight)
+                  address = cacheHandler.allocate(key, value)
                 } finally {
                   lock.writeLock().unlock()
                   lockManagement.removeLock(key)
@@ -270,9 +283,9 @@ class LRUCache[K, V](
           }
         }
 
-        require(address != 0, "The address should not be zero")
+        require(address != 0, "There aren't enough memory after eviction, please consider increase the memory limit")
         // TODO: we need to support cache data asynchronously
-        val result = cacheHandler.cache(key, value, weight, address)
+        val result = cacheHandler.cache(key, value, address)
         if (!result) {
           throw new RuntimeException(s"Cache failed: key: ${key}, value: ${value}, address: ${address}")
         }
@@ -287,24 +300,31 @@ class LRUCache[K, V](
       }
     }
 
+    @GuardedBy("lock")
     private def prepareWrite(): Unit = {
       while (!recentQueue.isEmpty) {
         accessQueue.add(recentQueue.poll())
       }
     }
 
+    @GuardedBy("lock")
     private def evict(): Entry[K, V] = {
       val evictedEntry = accessQueue.peek()
-      removeEntryFromChain(evictedEntry)
+      if (evictedEntry != null) {
+        removeEntryFromChain(evictedEntry)
+      }
       evictedEntry
     }
 
+    @GuardedBy("lock")
     private def evict(max: Long): Unit = {
-      while (totalWeight > max) {
-        evict()
+      var continue = true
+      while (continue && totalWeight > max) {
+        continue = evict() == null
       }
     }
 
+    @GuardedBy("lock")
     private def enqueueNotification(entry: Entry[K, V]): Unit = {
       totalWeight -= entry.getWeight
       count -= 1
@@ -316,6 +336,7 @@ class LRUCache[K, V](
      * removing the entry, so we need copy those entry which from head to target.
      * @param entry The entry need to be removed
      */
+    @GuardedBy("lock")
     private def removeEntryFromChain(entry: Entry[K, V]): Unit = {
       lock.lock()
       try {
@@ -340,10 +361,12 @@ class LRUCache[K, V](
       recentQueue.add(entry)
     }
 
+    @GuardedBy("lock")
     @inline private def recordReadWithLock(entry: Entry[K, V]): Unit = {
       accessQueue.add(entry)
     }
 
+    @GuardedBy("lock")
     private def expand(): Unit = {
       lock.lock()
       try {
@@ -390,7 +413,6 @@ class LRUCache[K, V](
         }
 
         table = newTable
-
       } finally {
         lock.unlock()
       }
@@ -415,19 +437,24 @@ class LRUCache[K, V](
     }
 
     def remove(key: K, hash: Int): Option[V] = {
-      var head = table.get(hash & (table.length() - 1))
-      while (head != null) {
-        if (head.getHash() == hash && head.getKey() == key) {
-          removeEntryFromChain(head)
-          return Option(head.getValue())
-        }
+      if (count != 0) {
+        var head = table.get(hash & (table.length() - 1))
+        while (head != null) {
+          if (head.getHash() == hash && head.getKey() == key) {
+            removeEntryFromChain(head)
+            return Option(head.getValue())
+          }
 
-        head = head.getNext()
+          head = head.getNext()
+        }
       }
 
       None
     }
 
+    def size(): Int = {count}
+
+    @GuardedBy("lock")
     def clear(): Unit = {
       if (count != 0) {
         lock.lock()
@@ -448,7 +475,6 @@ class LRUCache[K, V](
           accessQueue.clear()
           recentQueue.clear()
           count = 0
-
         } finally {
           lock.unlock()
         }
@@ -458,8 +484,9 @@ class LRUCache[K, V](
 }
 
 /**
- * A dequeue used to record the access order of key. This is not threadsafe, modify should be under lock.
+ * A queue used to record the access order of key. This is not threadsafe, modification should be under lock.
  */
+@NotThreadSafe
 private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
   private var _size: Int = 0
   private val header: Entry[K, V] = new AbstractEntry[K, V] {
@@ -546,26 +573,6 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
     }
   }
 
-  /**
-   * Return a iterator from tail to head
-   */
-  def reverseIterator(): Iterator[Entry[K, V]] = {
-    new Iterator[Entry[K, V]] {
-      var entry: Entry[K, V] = header.getPreviousInAccessQueue()
-      override def hasNext: Boolean = entry != header
-
-      override def next(): Entry[K, V] = {
-        if (hasNext) {
-          val previous = entry
-          entry = entry.getPreviousInAccessQueue()
-          previous
-        } else {
-          null
-        }
-      }
-    }
-  }
-
   override def size(): Int = _size
 
   override def clear(): Unit = {
@@ -578,6 +585,7 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
 
     header.setPreviousInAccessQueue(header)
     header.setNextInAccessQueue(header)
+    _size = 0
   }
 
   @inline def connectAccessOrder(previous: Entry[K, V], next: Entry[K, V]): Unit = {

@@ -15,8 +15,8 @@ trait RemoveListener[K, V] {
 /**
  * A cache handler used to allocate the requested memory and cache the data into the given address.
  * Ideally, we should requested the memory first and load the data into the address directly. However,
- * firstly, we may support cache data asynchronously. Secondly, we should get the accurate space for
- * the data cache.
+ * there are two reasons for limiting it. Firstly, we may support cache data asynchronously. Secondly,
+ * we should get the accurate space for the data cache.
  *
  * So, the step of cache data as follows:
  *
@@ -29,17 +29,18 @@ trait RemoveListener[K, V] {
  *        // the weight should be enough, however there may be memory fragmentation.
  *        // So, we need evict some data ...
  *     }
- * @tparam K
- * @tparam V
  */
 trait CacheHandler[K, V] {
 
   /**
    * @return the address of allocated memory
    */
-  def allocate(key: K, value: V, weight: Int): Long
+  def allocate(key: K, value: V): Long
 
-  def cache(key: K, value: V, weight: Int, address: Long): Boolean
+  /**
+   * Cache the value to given address.
+   */
+  def cache(key: K, value: V, address: Long): Boolean
 }
 
 /**
@@ -65,8 +66,4 @@ trait Loader[K, V] {
    * @return the loaded value
    */
   def load(key: K): V
-}
-
-trait SafeLoader[K, V] {
-
 }

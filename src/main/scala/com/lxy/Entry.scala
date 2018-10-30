@@ -64,6 +64,14 @@ class ConcreteEntry[K, V](
   }
 
   override def getPreviousInAccessQueue(): Entry[K, V] = previousAccess
+
+  override def toString: String = {
+    s"Key: ${key}, " +
+      s"hash: ${hash}, " +
+      s"value: ${value}, " +
+      s"weight: ${weight}, " +
+      s"next key: ${if (next == null) "null" else next.getKey()}"
+  }
 }
 
 object Entry {
@@ -85,8 +93,8 @@ object Entry {
   def copy[K, V](
       original: Entry[K, V],
       newNext: Entry[K, V]): Entry[K, V] = {
-    // here, we can't null the access entry in original access queue, because we need guarantee that
-    // the read of old table can proceed
+    // here, we can't nullify the access order in original access queue, because we need guarantee that
+    // the read of old table can be proceed
     val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),
       original.getValue(), original.getWeight, newNext)
     entry.setPreviousInAccessQueue(original.getPreviousInAccessQueue())
