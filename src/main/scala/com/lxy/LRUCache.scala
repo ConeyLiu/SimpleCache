@@ -19,6 +19,7 @@ class LRUCache[K, V](
     private final val removeListeners: Seq[RemoveListener[K, V]],
     private final val lockManagement: LockManagement[K]) extends Cache[K, V]{
 
+  private final val cacheStatusCounter = CacheStatusCounter()
   private final val (segmentCount, shift, segmentInitialCapacity, weights) = init()
   private final val segments = new Array[Segment](segmentCount)
   segments.indices.foreach{ i =>
@@ -85,7 +86,7 @@ class LRUCache[K, V](
       size: Int,
       maxSize: Int,
       maxWeight: Long): Segment = {
-    new Segment(size, maxSize, maxWeight)
+    new Segment(size, maxSize, maxWeight, cacheStatusCounter)
   }
 
   private def segmentFor(hash: Int): Segment = {
@@ -131,6 +132,10 @@ class LRUCache[K, V](
     segments.foldLeft(0L)((pre, cur) => pre + cur.size)
   }
 
+  override def status(): CacheStatus = {
+    cacheStatusCounter.snapshot()
+  }
+
   private def reHash(key: K): Int = {
     var h = key.hashCode()
     // Spread bits to regularize both segment and index locations,
@@ -165,7 +170,8 @@ class LRUCache[K, V](
   private class Segment(
       private final val initialSize: Int,
       private final val maxSize: Int,
-      private final val maxWeight: Long){
+      private final val maxWeight: Long,
+      private final val cacheStatusCounter: CacheStatusCounter){
     @volatile private var totalWeight: Long = 0L
     @volatile private var table = new AtomicReferenceArray[Entry[K, V]](initialSize)
     @GuardedBy("lock") @volatile private var count: Int = 0
@@ -217,11 +223,14 @@ class LRUCache[K, V](
           return value
         }
 
-        //TODO: record the loading time
         val loadingStart = System.nanoTime()
         val value = loader.load(key)
         val loadingTime = System.nanoTime() - loadingStart
         val weight = weigher.weight(key, value)
+
+        cacheStatusCounter.totalLoadTimeCounter.addAndGet(loadingTime / 1000)
+        cacheStatusCounter.loadCounter.incrementAndGet()
+        cacheStatusCounter.missCounter.incrementAndGet()
 
         require(weight <= maxWeight, s"The weight: ${weight} of entry(key: ${key}, value: ${value}) " +
           s"should be less than or equal to maxWeight: ${maxWeight}")
@@ -315,6 +324,7 @@ class LRUCache[K, V](
       val evictedEntry = accessQueue.peek()
       if (evictedEntry != null) {
         removeEntryFromChain(evictedEntry, true)
+        cacheStatusCounter.evictionCounter.incrementAndGet()
       }
       evictedEntry
     }
@@ -368,6 +378,7 @@ class LRUCache[K, V](
 
     @inline private def recordRead(entry: Entry[K, V]): Unit = {
       recentQueue.add(entry)
+      cacheStatusCounter.hitCounter.incrementAndGet()
     }
 
     @GuardedBy("lock")

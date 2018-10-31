@@ -6,6 +6,7 @@ abstract class Cache[K, V] {
   def contains(key: K): Boolean
   def remove(key: K): Option[V]
   def size(): Long
+  def status(): CacheStatus
   def clear(): Unit
 }
 
