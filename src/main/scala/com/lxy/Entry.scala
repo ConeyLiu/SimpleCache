@@ -65,12 +65,27 @@ class ConcreteEntry[K, V](
 
   override def getPreviousInAccessQueue(): Entry[K, V] = previousAccess
 
+  override def equals(obj: scala.Any): Boolean = {
+    if (obj == null) {
+      return false
+    }
+
+    if (obj.isInstanceOf[ConcreteEntry[K, V]]) {
+      val other = obj.asInstanceOf[ConcreteEntry[K, V]]
+      if (getHash() == other.getHash() && getKey() == other.getKey()) {
+        return true
+      }
+    }
+
+    false
+  }
+
   override def toString: String = {
-    s"Key: ${key}, " +
+    s"{Key: ${key}, " +
       s"hash: ${hash}, " +
       s"value: ${value}, " +
       s"weight: ${weight}, " +
-      s"next key: ${if (next == null) "null" else next.getKey()}"
+      s"next key: ${if (next == null) "null" else next.getKey()}}"
   }
 }
 
@@ -93,6 +108,7 @@ object Entry {
   def copy[K, V](
       original: Entry[K, V],
       newNext: Entry[K, V]): Entry[K, V] = {
+    require(original != null, "The original entry can't be null")
     // here, we can't nullify the access order in original access queue, because we need guarantee that
     // the read of old table can be proceed
     val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),

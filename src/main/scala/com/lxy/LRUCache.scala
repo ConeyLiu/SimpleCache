@@ -32,7 +32,7 @@ class LRUCache[K, V](
 
   private val removeTask = new Runnable {
     override def run(): Unit = {
-      val entry = removalQueue.poll(500, TimeUnit.MILLISECONDS)
+      val entry = removalQueue.poll()
       if (entry != null) {
         removeListeners.foreach{ listener =>
           listener.onRemove(entry.getKey(), entry.getValue())
@@ -45,7 +45,7 @@ class LRUCache[K, V](
   // different from the record order which in removalQueue.
   // TODO: make the size of the threadpool and remove order configurable.
   private final val removalExecutor = Executors.newScheduledThreadPool(2)
-  removalExecutor.scheduleAtFixedRate(removeTask, 200, 200, TimeUnit.MILLISECONDS)
+  removalExecutor.scheduleAtFixedRate(removeTask, 0, 200, TimeUnit.MILLISECONDS)
 
   private def init(): (Int, Int, Int, Array[Long]) = {
     var segmentCount: Int = 1
@@ -217,21 +217,17 @@ class LRUCache[K, V](
           return value
         }
 
-        if (count > threshold) {
-          expand()
-        }
-
         //TODO: record the loading time
         val loadingStart = System.nanoTime()
         val value = loader.load(key)
         val loadingTime = System.nanoTime() - loadingStart
         val weight = weigher.weight(key, value)
 
-        require(weight < maxWeight, s"The weight: ${weight} of entry(key: ${key}, value: ${value}) " +
-          s"should be smaller than maxWeight: ${maxWeight}")
+        require(weight <= maxWeight, s"The weight: ${weight} of entry(key: ${key}, value: ${value}) " +
+          s"should be less than or equal to maxWeight: ${maxWeight}")
 
         // First, we need to satisfy the weight condition's check
-        if (weight >= (maxWeight - totalWeight)) {
+        if (weight > (maxWeight - totalWeight)) {
           // if there aren't enough space, evict it.
           evict(maxWeight - weight)
         }
@@ -240,12 +236,12 @@ class LRUCache[K, V](
         if (address == 0) {
           // there maybe memory fragmentation
 
-          // if the removal queue is not empty, we need wait it do some post process for 500 ms.
+          // if the removal queue is not empty, we need wait it do some post process for 1000 ms.
           // TODO: make the wait time configurable
           if (!LRUCache.this.removalQueueIsEmpty()) {
-            val start = System.currentTimeMillis()
-            while (address == 0 && (System.currentTimeMillis() - start) < 200) {
-              val sleepTime = 200 - (System.currentTimeMillis() - start)
+            val end = System.currentTimeMillis() + 1000
+            while (address == 0 && System.currentTimeMillis() < end) {
+              val sleepTime = end - System.currentTimeMillis()
               if (sleepTime > 0) {
                 try {
                   Thread.sleep(sleepTime)
@@ -271,12 +267,12 @@ class LRUCache[K, V](
               lock = lockManagement.getLock(entry.getKey())
               if (lock.writeLock().tryLock(200, TimeUnit.MILLISECONDS)) {
                 try {
-                  removeEntryFromChain(entry)
+                  removeEntryFromChain(entry, false)
                   LRUCache.this.forceEviction(entry)
                   address = cacheHandler.allocate(key, value)
                 } finally {
                   lock.writeLock().unlock()
-                  lockManagement.removeLock(key)
+                  lockManagement.removeLock(entry.getKey())
                 }
               }
             }
@@ -291,9 +287,16 @@ class LRUCache[K, V](
         }
         totalWeight += weight
         count += 1
-        val newEntry = Entry(key, hash, value, weight, head)
+        // the head maybe removed, so we need get the head from the table
+        val updatedHead = table.get(hash & (table.length() - 1))
+        val newEntry = Entry(key, hash, value, weight, updatedHead)
         table.set(hash & (table.length() - 1), newEntry)
         recordReadWithLock(newEntry)
+
+        if (count >= threshold) {
+          expand()
+        }
+
         value
       } finally {
         lock.unlock()
@@ -311,47 +314,53 @@ class LRUCache[K, V](
     private def evict(): Entry[K, V] = {
       val evictedEntry = accessQueue.peek()
       if (evictedEntry != null) {
-        removeEntryFromChain(evictedEntry)
+        removeEntryFromChain(evictedEntry, true)
       }
       evictedEntry
     }
 
+    /**
+     * Evict the total weight to max weight.
+     */
     @GuardedBy("lock")
     private def evict(max: Long): Unit = {
       var continue = true
       while (continue && totalWeight > max) {
-        continue = evict() == null
+        continue = evict() != null
       }
-    }
-
-    @GuardedBy("lock")
-    private def enqueueNotification(entry: Entry[K, V]): Unit = {
-      totalWeight -= entry.getWeight
-      count -= 1
-      LRUCache.this.enqueueNotification(entry)
     }
 
     /**
      * Remove an entry from the entry chain. we need guarantee that it doesn't impact the read when
      * removing the entry, so we need copy those entry which from head to target.
      * @param entry The entry need to be removed
+     * @param enqueue whether enqueue the removal queue
      */
     @GuardedBy("lock")
-    private def removeEntryFromChain(entry: Entry[K, V]): Unit = {
+    private def removeEntryFromChain(entry: Entry[K, V], enqueue: Boolean): Unit = {
       lock.lock()
       try {
-        enqueueNotification(entry)
+        require(entry != null, "Can't remove null entry from chain")
+        if (enqueue) {
+          LRUCache.this.enqueueNotification(entry)
+        }
+
         // Modify accessQueue need be guard by lock, so we should remove the entry in accessQueue at here
         accessQueue.remove(entry)
         val index = entry.getHash() & (table.length() - 1)
         val head = table.get(index)
         var e = head
-        var newHead = entry.getNext()
-        while (e != entry) {
-          newHead = Entry.copy(e, newHead)
+        var newHead: Entry[K, V] = null
+        while (e != null) {
+          if (e != entry) {
+            newHead = Entry.copy(e, newHead)
+          }
           e = e.getNext()
         }
+
         table.set(index, newHead)
+        totalWeight -= entry.getWeight
+        count -= 1
       } finally {
         lock.unlock()
       }
@@ -381,8 +390,8 @@ class LRUCache[K, V](
         val newMask = newSize -1
         (0 until oldSize).foreach { i =>
           val head = table.get(i)
-          val newHeadIndex = head.getHash() & newMask
           if (head != null) {
+            val newHeadIndex = head.getHash() & newMask
             if (head.getNext() == null) {
               newTable.set(newHeadIndex, head)
             } else {
@@ -441,7 +450,7 @@ class LRUCache[K, V](
         var head = table.get(hash & (table.length() - 1))
         while (head != null) {
           if (head.getHash() == hash && head.getKey() == key) {
-            removeEntryFromChain(head)
+            removeEntryFromChain(head, true)
             return Option(head.getValue())
           }
 
