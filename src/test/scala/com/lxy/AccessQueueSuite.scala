@@ -4,12 +4,12 @@ import org.scalatest.{BeforeAndAfterAll, FunSuite}
 
 class AccessQueueSuite extends FunSuite with BeforeAndAfterAll{
 
-  var data: Seq[Entry[Int, Int]] = null
+  var data: Array[Entry[Int, Int]] = null
 
   override def beforeAll(): Unit = {
     data = (0 until 10).map {i =>
       Entry(i, reHash(i), i, 1, null)
-    }
+    }.toArray
   }
 
   override def afterAll(): Unit = {
@@ -32,6 +32,15 @@ class AccessQueueSuite extends FunSuite with BeforeAndAfterAll{
       "The polled entry should be nullify access order")
     assert(polled.getPreviousInAccessQueue() === Entry.getNullEntry(),
       "The polled entry should be nullify access order")
+
+    data(2) = Entry(18, reHash(18), 18, 1, null)
+
+    (0 until data.length).foreach{ i =>
+      queue.offer(data(i))
+    }
+
+    queue.remove(data(1))
+    queue.remove(data(1))
 
     queue.clear()
     assert(queue.isEmpty, "Queue should be empty after clear")

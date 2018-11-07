@@ -198,19 +198,20 @@ class LRUCache[K, V](
           recordRead(entry)
           Some(value)
         } else {
-          Option(put(key, hash, first, loader))
+          Option(put(key, hash, loader))
         }
       } else {
-        Option(put(key, hash, null, loader))
+        Option(put(key, hash, loader))
       }
     }
 
     @GuardedBy("lock")
-    private def put(key: K, hash: Int, head: Entry[K, V], loader: Loader[K, V]): V = {
+    private def put(key: K, hash: Int, loader: Loader[K, V]): V = {
       lock.lock()
       try {
         prepareWrite()
 
+        val head = table.get(hash & (table.length() - 1))
         var entry: Entry[K, V] = head
         while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
           entry = entry.getNext()
@@ -529,13 +530,16 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
   }
 
   override def offer(e: Entry[K, V]): Boolean = {
+    if (!contains(e)) {
+      _size += 1
+    }
+
     connectAccessOrder(e.getPreviousInAccessQueue(), e.getNextInAccessQueue())
     // put the entry in the tail
     // header.previous <-> header
     // header.previous <-> entry <-> header
     connectAccessOrder(header.getPreviousInAccessQueue(), e)
     connectAccessOrder(e, header)
-    _size += 1
     true
   }
 

@@ -1,5 +1,7 @@
 package com.lxy
 
+import java.util.Objects
+
 trait Entry[K, V] {
   def getKey(): K
   def getHash(): Int
@@ -65,19 +67,14 @@ class ConcreteEntry[K, V](
 
   override def getPreviousInAccessQueue(): Entry[K, V] = previousAccess
 
-  override def equals(obj: scala.Any): Boolean = {
-    if (obj == null) {
-      return false
-    }
+  override def hashCode(): Int = Objects.hashCode(key, hash)
 
-    if (obj.isInstanceOf[ConcreteEntry[K, V]]) {
-      val other = obj.asInstanceOf[ConcreteEntry[K, V]]
-      if (getHash() == other.getHash() && getKey() == other.getKey()) {
-        return true
-      }
-    }
-
-    false
+  override def equals(obj: Any): Boolean = obj match {
+    case other: ConcreteEntry[K, V] =>
+      getHash() == other.getHash() &&
+        getKey() == other.getKey() &&
+        hashCode() == other.hashCode()
+    case _ => false
   }
 
   override def toString: String = {
@@ -91,7 +88,25 @@ class ConcreteEntry[K, V](
 
 object Entry {
 
-  private val NULL = new ConcreteEntry[Any, Any](0, 0, null, 0, null)
+  private val NULL = new AbstractEntry[Any, Any] {
+    override def getKey(): Any = 0
+
+    override def getHash(): Int = 0
+
+    override def getValue(): Any = 0
+
+    override def getWeight: Int = 0
+
+    override def getNext(): Entry[Any, Any] = null
+
+    override def setNextInAccessQueue(next: Entry[Any, Any]): Unit = {}
+
+    override def getNextInAccessQueue(): Entry[Any, Any] = null
+
+    override def setPreviousInAccessQueue(previous: Entry[Any, Any]): Unit = {}
+
+    override def getPreviousInAccessQueue(): Entry[Any, Any] = null
+  }
 
   def getNullEntry[K, V](): Entry[K, V] = {
     NULL.asInstanceOf[Entry[K, V]]
@@ -114,7 +129,7 @@ object Entry {
     val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),
       original.getValue(), original.getWeight, newNext)
     entry.setPreviousInAccessQueue(original.getPreviousInAccessQueue())
-    entry.setNextInAccessQueue(entry.getNextInAccessQueue())
+    entry.setNextInAccessQueue(original.getNextInAccessQueue())
     entry
   }
 }
