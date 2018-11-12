@@ -189,17 +189,15 @@ class LRUCache[K, V](
       if (count != 0) {
         val first = table.get(hash & (table.length() - 1))
         var entry: Entry[K, V] = first
-        while (entry != null && (entry.getHash() != hash || entry.getKey() != key)) {
+        while (entry != null) {
+          if ( entry.getHash() == hash && entry.getKey() == key && entry.isValid) {
+            recordRead(entry)
+            return Some(entry.getValue())
+          }
           entry = entry.getNext()
         }
 
-        if (entry != null) {
-          val value = entry.getValue()
-          recordRead(entry)
-          Some(value)
-        } else {
-          Option(put(key, hash, loader))
-        }
+        Option(put(key, hash, loader))
       } else {
         Option(put(key, hash, loader))
       }
@@ -313,10 +311,23 @@ class LRUCache[K, V](
       }
     }
 
+    def copyEntry(original: Entry[K, V], next: Entry[K, V]): Entry[K, V] = {
+      require(original != null, "The original entry can't be null")
+      // here, we can't nullify the access order in original access queue, because we need guarantee that
+      // the read of old table can be proceed
+      val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),
+        original.getValue(), original.getWeight, next)
+      LRUCache.connectAccessOrder(original.getPreviousInAccessQueue(), entry)
+      LRUCache.connectAccessOrder(entry, original.getNextInAccessQueue())
+      LRUCache.nullifyAccessOrder(original)
+      original.markAsInvalid
+      entry
+    }
+
     @GuardedBy("lock")
     private def prepareWrite(): Unit = {
       while (!recentQueue.isEmpty) {
-        accessQueue.add(recentQueue.poll())
+        accessQueue.offer(recentQueue.poll())
       }
     }
 
@@ -361,11 +372,9 @@ class LRUCache[K, V](
         val index = entry.getHash() & (table.length() - 1)
         val head = table.get(index)
         var e = head
-        var newHead: Entry[K, V] = null
-        while (e != null) {
-          if (e != entry) {
-            newHead = Entry.copy(e, newHead)
-          }
+        var newHead: Entry[K, V] = entry.getNext()
+        while (e != entry) {
+          newHead = copyEntry(e, newHead)
           e = e.getNext()
         }
 
@@ -384,7 +393,7 @@ class LRUCache[K, V](
 
     @GuardedBy("lock")
     @inline private def recordReadWithLock(entry: Entry[K, V]): Unit = {
-      accessQueue.add(entry)
+      accessQueue.offer(entry)
     }
 
     @GuardedBy("lock")
@@ -425,7 +434,7 @@ class LRUCache[K, V](
               while (e != tailEntry) {
                 val newIndex = e.getHash() & newMask
                 val newNext = newTable.get(newIndex)
-                val newHead = Entry.copy(e, newNext)
+                val newHead = copyEntry(e, newNext)
                 newTable.set(newIndex, newHead)
                 e = e.getNext()
               }
@@ -444,7 +453,7 @@ class LRUCache[K, V](
       if (count != 0) {
         var entry = table.get(hash & (table.length() - 1))
         while (entry != null) {
-          if (entry.getHash() == hash && entry.getKey() == key) {
+          if (entry.getHash() == hash && entry.getKey() == key && entry.isValid) {
             return true
           }
 
@@ -461,7 +470,7 @@ class LRUCache[K, V](
       if (count != 0) {
         var head = table.get(hash & (table.length() - 1))
         while (head != null) {
-          if (head.getHash() == hash && head.getKey() == key) {
+          if (head.getHash() == hash && head.getKey() == key && head.isValid) {
             removeEntryFromChain(head, true)
             return Option(head.getValue())
           }
@@ -504,6 +513,18 @@ class LRUCache[K, V](
   }
 }
 
+object LRUCache {
+  @inline def connectAccessOrder[K, V](previous: Entry[K, V], next: Entry[K, V]): Unit = {
+    previous.setNextInAccessQueue(next)
+    next.setPreviousInAccessQueue(previous)
+  }
+
+  @inline def nullifyAccessOrder[K, V](entry: Entry[K, V]): Unit = {
+    entry.setPreviousInAccessQueue(Entry.getNullEntry())
+    entry.setNextInAccessQueue(Entry.getNullEntry())
+  }
+}
+
 /**
  * A queue used to record the access order of key. This is not threadsafe, modification should be under lock.
  */
@@ -530,16 +551,20 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
   }
 
   override def offer(e: Entry[K, V]): Boolean = {
+    if (e == null || e == Entry.getNullEntry() || !e.isValid) {
+      return false
+    }
+
     if (!contains(e)) {
       _size += 1
     }
 
-    connectAccessOrder(e.getPreviousInAccessQueue(), e.getNextInAccessQueue())
+    LRUCache.connectAccessOrder(e.getPreviousInAccessQueue(), e.getNextInAccessQueue())
     // put the entry in the tail
     // header.previous <-> header
     // header.previous <-> entry <-> header
-    connectAccessOrder(header.getPreviousInAccessQueue(), e)
-    connectAccessOrder(e, header)
+    LRUCache.connectAccessOrder(header.getPreviousInAccessQueue(), e)
+    LRUCache.connectAccessOrder(e, header)
     true
   }
 
@@ -564,8 +589,8 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
   override def remove(o: scala.Any): Boolean = {
     if (contains(o)) {
       val entry = o.asInstanceOf[Entry[K, V]]
-      connectAccessOrder(entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
-      nullifyAccessOrder(entry)
+      LRUCache.connectAccessOrder(entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
+      LRUCache.nullifyAccessOrder(entry)
       _size -= 1
       true
     } else {
@@ -603,24 +628,14 @@ private[lxy] class AccessQueue[K, V] extends util.AbstractQueue[Entry[K, V]] {
     var entry = header.getNextInAccessQueue()
     while (entry != header) {
       val next = entry.getNextInAccessQueue()
-      nullifyAccessOrder(entry)
+      LRUCache.connectAccessOrder(entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
+      LRUCache.nullifyAccessOrder(entry)
       entry = next
     }
 
     header.setPreviousInAccessQueue(header)
     header.setNextInAccessQueue(header)
     _size = 0
-  }
-
-  @inline def connectAccessOrder(previous: Entry[K, V], next: Entry[K, V]): Unit = {
-    previous.setNextInAccessQueue(next)
-    next.setPreviousInAccessQueue(previous)
-  }
-
-  @inline def nullifyAccessOrder(entry: Entry[K, V]): Unit = {
-    connectAccessOrder(entry.getPreviousInAccessQueue(), entry.getNextInAccessQueue())
-    entry.setPreviousInAccessQueue(Entry.getNullEntry())
-    entry.setNextInAccessQueue(Entry.getNullEntry())
   }
 }
 

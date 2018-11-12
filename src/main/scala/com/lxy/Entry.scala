@@ -12,6 +12,8 @@ trait Entry[K, V] {
   def getNextInAccessQueue(): Entry[K, V]
   def setPreviousInAccessQueue(previous: Entry[K, V]): Unit
   def getPreviousInAccessQueue(): Entry[K, V]
+  def isValid: Boolean
+  def markAsInvalid: Unit
 }
 
 abstract class AbstractEntry[K, V] extends Entry[K, V] {
@@ -33,6 +35,10 @@ abstract class AbstractEntry[K, V] extends Entry[K, V] {
   override def setPreviousInAccessQueue(previous: Entry[K, V]): Unit = throw new UnsupportedOperationException
 
   override def getPreviousInAccessQueue(): Entry[K, V] = throw new UnsupportedOperationException
+
+  override def isValid: Boolean = throw new UnsupportedOperationException
+
+  override def markAsInvalid: Unit = throw new UnsupportedOperationException
 }
 
 class ConcreteEntry[K, V](
@@ -44,6 +50,7 @@ class ConcreteEntry[K, V](
 
   @volatile private var nextAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
   @volatile private var previousAccess: Entry[K, V] = Entry.getNullEntry[K, V]()
+  @volatile private var _isValid = true
 
   override def getKey(): K = key
 
@@ -66,6 +73,12 @@ class ConcreteEntry[K, V](
   }
 
   override def getPreviousInAccessQueue(): Entry[K, V] = previousAccess
+
+  override def isValid: Boolean = _isValid
+
+  override def markAsInvalid: Unit = {
+    _isValid = false
+  }
 
   override def hashCode(): Int = Objects.hashCode(key, hash)
 
@@ -106,6 +119,10 @@ object Entry {
     override def setPreviousInAccessQueue(previous: Entry[Any, Any]): Unit = {}
 
     override def getPreviousInAccessQueue(): Entry[Any, Any] = null
+
+    override def isValid: Boolean = false
+
+    override def markAsInvalid: Unit = {}
   }
 
   def getNullEntry[K, V](): Entry[K, V] = {
@@ -119,17 +136,4 @@ object Entry {
       weight: Int,
       next: Entry[K, V]): Entry[K, V] =
     new ConcreteEntry(key, hash, value, weight, next)
-
-  def copy[K, V](
-      original: Entry[K, V],
-      newNext: Entry[K, V]): Entry[K, V] = {
-    require(original != null, "The original entry can't be null")
-    // here, we can't nullify the access order in original access queue, because we need guarantee that
-    // the read of old table can be proceed
-    val entry = new ConcreteEntry[K, V](original.getKey(), original.getHash(),
-      original.getValue(), original.getWeight, newNext)
-    entry.setPreviousInAccessQueue(original.getPreviousInAccessQueue())
-    entry.setNextInAccessQueue(original.getNextInAccessQueue())
-    entry
-  }
 }
