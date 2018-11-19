@@ -14,23 +14,25 @@ trait RemoveListener[K, V] {
 
 /**
  * A cache handler used to allocate the requested memory and cache the data into the given address.
- * Ideally, we should requested the memory first and load the data into the address directly. However,
- * there are two reasons for limiting it. Firstly, we may support cache data asynchronously. Secondly,
- * we should get the accurate space for the data cache.
+ * Ideally, we should requested the memory first and load the data into the address directly.
+ * However, there are two reasons for limiting it. Firstly, we may support cache data
+ * asynchronously. Secondly, we should get the accurate space for the data cache.
  *
  * So, the step of cache data as follows:
  *
  *     val value = loader.load(key)
  *     val weight = weigher.weight(key, value)
  *     var address = cacheHandler.allocate(key, value, weight)
- *     if (address != 0) {
+ *     val result = if (address != 0) {
  *        cacheHandler.cache(key, value, weight, address)
  *     } else {
  *        // the weight should be enough, however there may be memory fragmentation.
  *        // So, we need evict some data ...
  *     }
+ *
+ *     // store (key, result)
  */
-trait CacheHandler[K, V] {
+trait CacheHandler[K, V, R] {
 
   /**
    * @return the address of allocated memory
@@ -38,13 +40,15 @@ trait CacheHandler[K, V] {
   def allocate(key: K, value: V): Long
 
   /**
-   * Cache the value to given address.
+   * Cache the value to given address. And return the cache result, we will store the result
+   * into the cache.
    */
-  def cache(key: K, value: V, address: Long): Boolean
+  def cache(key: K, value: V, address: Long): Option[R]
 }
 
 /**
- * A weigher that used to calculate the quantify of a entry which is defined by the key and the value.
+ * A weigher that used to calculate the quantify of a entry which is defined by the key and the
+ * value.
  * @tparam K the key of the entry
  * @tparam V the value of the entry
  */
@@ -67,3 +71,4 @@ trait Loader[K, V] {
    */
   def load(key: K): V
 }
+

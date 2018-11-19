@@ -15,12 +15,12 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
   test("normal test with single thread") {
     val map = Map(1 -> 1, 2 -> 2, 3-> 3)
     val maxMemory = new AtomicInteger(6)
-    val cache = Cache.lru[Int, Int](1, 8, 6,
+    val cache = Cache.lru[Int, Int, Int](1, 8, 6,
       getPlainWeigher(),
       getPlainLoader(map, 4),
       getCacheHandler(maxMemory),
       getRemovalListener(maxMemory) :: Nil,
-      new LockManagement[Int]())
+      Nil)
 
     assert(!cache.contains(1))
     val value1 = cache.get(1)
@@ -48,12 +48,12 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
   test("expand test") {
     val map = Map(1 -> 1, 2 -> 2, 3 -> 3, 4 -> 4, 5 -> 5)
     val maxMemory = new AtomicInteger(6)
-    val cache = Cache.lru[Int, Int](1, 1, 6,
+    val cache = Cache.lru[Int, Int, Int](1, 1, 6,
       getPlainWeigher(),
       getPlainLoader(map, 6),
       getCacheHandler(maxMemory),
       getRemovalListener(maxMemory) :: Nil,
-      new LockManagement[Int]())
+      Nil)
 
     assert(cache.size() === 0)
     (1 until 6).foreach(i => assert(!cache.contains(i)))
@@ -77,12 +77,12 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
     }
     val map = Map(1 -> 1, 2 -> 2, 3-> 3)
     val maxMemory = new AtomicInteger(6)
-    val cache = Cache.lru[Int, Int](1, 8, 6,
+    val cache = Cache.lru[Int, Int, Int](1, 8, 6,
       getPlainWeigher(),
       getPlainLoader(map, 4),
       getCacheHandler(maxMemory),
       getRemovalListener(maxMemory) :: listener :: Nil,
-      new LockManagement[Int]())
+      Nil)
 
     cache.get(1)
     cache.get(2)
@@ -109,12 +109,12 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
   test("normal test with multi-threads") {
     val map = Map(1 -> 1, 2 -> 2, 3-> 3, 4 -> 4, 5 -> 5)
     val maxMemory = new AtomicInteger(12)
-    val cache = Cache.lru[Int, Int](2, 8, 12,
+    val cache = Cache.lru[Int, Int, Int](2, 8, 12,
       getPlainWeigher(),
       getPlainLoader(map, 6),
       getCacheHandler(maxMemory),
       getRemovalListener(maxMemory) :: Nil,
-      new LockManagement[Int]())
+      Nil)
     implicit val context: ExecutionContext = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(3))
     val tasks = (1 until 8).map { i =>
       Future {
@@ -134,8 +134,8 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
     }
   }
 
-  def getCacheHandler(totalMemory: AtomicInteger): CacheHandler[Int, Int] = {
-    new CacheHandler[Int, Int] {
+  def getCacheHandler(totalMemory: AtomicInteger): CacheHandler[Int, Int, Int] = {
+    new CacheHandler[Int, Int, Int] {
       override def allocate(key: Int, value: Int): Long = {
         val address = new AtomicLong(0L)
         totalMemory.updateAndGet(new IntUnaryOperator{
@@ -153,11 +153,11 @@ class LRUCacheSuite extends FunSuite with BeforeAndAfterAll {
         address.get()
       }
 
-      override def cache(key: Int, value: Int, address: Long): Boolean = {
+      override def cache(key: Int, value: Int, address: Long): Option[Int] = {
         if (address != 0) {
-          true
+          Some(value)
         } else {
-          false
+          None
         }
       }
     }

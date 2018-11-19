@@ -12,8 +12,8 @@ trait Entry[K, V] {
   def getNextInAccessQueue(): Entry[K, V]
   def setPreviousInAccessQueue(previous: Entry[K, V]): Unit
   def getPreviousInAccessQueue(): Entry[K, V]
-  def isValid: Boolean
-  def markAsInvalid: Unit
+  def isValid(): Boolean
+  def markAsInvalid(): Unit
 }
 
 abstract class AbstractEntry[K, V] extends Entry[K, V] {
@@ -36,9 +36,9 @@ abstract class AbstractEntry[K, V] extends Entry[K, V] {
 
   override def getPreviousInAccessQueue(): Entry[K, V] = throw new UnsupportedOperationException
 
-  override def isValid: Boolean = throw new UnsupportedOperationException
+  override def isValid(): Boolean = throw new UnsupportedOperationException
 
-  override def markAsInvalid: Unit = throw new UnsupportedOperationException
+  override def markAsInvalid(): Unit = throw new UnsupportedOperationException
 }
 
 class ConcreteEntry[K, V](
@@ -74,9 +74,9 @@ class ConcreteEntry[K, V](
 
   override def getPreviousInAccessQueue(): Entry[K, V] = previousAccess
 
-  override def isValid: Boolean = _isValid
+  override def isValid(): Boolean = _isValid
 
-  override def markAsInvalid: Unit = {
+  override def markAsInvalid(): Unit = {
     _isValid = false
   }
 
@@ -120,9 +120,9 @@ object Entry {
 
     override def getPreviousInAccessQueue(): Entry[Any, Any] = null
 
-    override def isValid: Boolean = false
+    override def isValid(): Boolean = false
 
-    override def markAsInvalid: Unit = {}
+    override def markAsInvalid(): Unit = {}
   }
 
   def getNullEntry[K, V](): Entry[K, V] = {
